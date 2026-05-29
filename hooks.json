@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeSubmitPrompt": [
+      { "command": "powershell -ExecutionPolicy Bypass -File .\\hooks\\set-status.ps1 busy" }
+    ],
+    "preToolUse": [
+      { "command": "powershell -ExecutionPolicy Bypass -File .\\hooks\\set-status.ps1 busy" }
+    ],
+    "postToolUse": [
+      { "command": "powershell -ExecutionPolicy Bypass -File .\\hooks\\set-status.ps1 busy" }
+    ],
+    "afterFileEdit": [
+      { "command": "powershell -ExecutionPolicy Bypass -File .\\hooks\\set-status.ps1 busy" }
+    ],
+    "subagentStart": [
+      { "command": "powershell -ExecutionPolicy Bypass -File .\\hooks\\set-status.ps1 busy" }
+    ],
+    "afterAgentThought": [
+      { "command": "powershell -ExecutionPolicy Bypass -File .\\hooks\\set-status.ps1 thinking" }
+    ],
+    "postToolUseFailure": [
+      { "command": "powershell -ExecutionPolicy Bypass -File .\\hooks\\set-status.ps1 error" }
+    ],
+    "stop": [
+      { "command": "powershell -ExecutionPolicy Bypass -File .\\hooks\\set-status.ps1 success" }
+    ],
+    "sessionEnd": [
+      { "command": "powershell -ExecutionPolicy Bypass -File .\\hooks\\set-status.ps1 success" }
+    ]
+  }
+}
