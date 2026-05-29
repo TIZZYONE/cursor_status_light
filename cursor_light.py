@@ -40,11 +40,17 @@ STATUS_DIR = Path.home() / ".cursor" / "status"
 PID_FILE = Path.home() / ".cursor" / "cursor_light.pid"
 CONFIG_FILE = Path.home() / ".cursor" / "cursor_light_config.json"
 
-POLL_MS = 300
+POLL_MS = 80
 STALE_SECONDS = 600
 SESSION_EXPIRE_SEC = 900
-# 最近一次 busy/thinking 后保持黄灯的秒数（避免工具间隔间隙误变绿）
+# 最近一次 busy/thinking 后保持黄灯的秒数（工具间隙补黄，无会话文件时）
 HEARTBEAT_HOLD_SEC = 30
+# 会话 json 标 busy 但超过此秒数未刷新 → 视为已结束（stop 常不触发）
+BUSY_IDLE_SEC = 45
+# 红灯至少持续这么久才显示（过滤 postToolUseFailure 后立刻重试的瞬时失败）
+ERROR_MIN_SHOW_SEC = 0.85
+# 超过此秒数的 error 记录不再参与聚合
+ERROR_STALE_SEC = 60
 
 BUSY_MODES = frozenset({"busy", "working", "thinking", "ai", "demo"})
 SUCCESS_MODES = frozenset({"success", "done", "idle", "off", "traffic"})
@@ -175,17 +181,112 @@ def _heartbeat_active(now: float) -> bool:
         return False
 
 
+def _status_dir_mtime() -> float:
+    """status 目录最新修改时间，用于尽快响应 Hook 写入。"""
+    if not STATUS_DIR.is_dir():
+        return 0.0
+    newest = 0.0
+    try:
+        for path in STATUS_DIR.iterdir():
+            if path.suffix != ".json":
+                continue
+            try:
+                newest = max(newest, path.stat().st_mtime)
+            except OSError:
+                continue
+    except OSError:
+        return 0.0
+    return newest
+
+
+def newest_workspace_hint() -> str | None:
+    """最近一条带 workspace 的会话记录（双击绿灯时优先聚焦该工程窗口）。"""
+    if not STATUS_DIR.is_dir():
+        return None
+    best_ts = None
+    best_ws: str | None = None
+    for path in STATUS_DIR.glob("*.json"):
+        if path.name in SKIP_STATUS_FILES:
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
+            ws = data.get("workspace")
+            ts = data.get("ts")
+            if not ws or not ts:
+                continue
+            parsed = parse_timestamp(ts)
+            if best_ts is None or parsed > best_ts:
+                best_ts = parsed
+                best_ws = str(ws)
+        except Exception:
+            continue
+    return best_ws
+
+
+_FOCUS_CURSOR_PS = r"""
+$ErrorActionPreference = "SilentlyContinue"
+$hint = $env:CURSOR_LIGHT_FOCUS_HINT
+$exe = Join-Path $env:LOCALAPPDATA "Programs\cursor\Cursor.exe"
+if (-not (Test-Path $exe)) { $exe = Join-Path $env:LOCALAPPDATA "Programs\Cursor\Cursor.exe" }
+$procs = @(Get-Process -Name "Cursor" -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 })
+if ($procs.Count -eq 0) {
+  if (Test-Path $exe) {
+    if ($hint) { Start-Process -FilePath $exe -ArgumentList "`"$hint`"" }
+    else { Start-Process -FilePath $exe }
+  }
+  exit
+}
+$shell = New-Object -ComObject WScript.Shell
+if ($hint) {
+  $name = [System.IO.Path]::GetFileName($hint.TrimEnd('\','/'))
+  foreach ($p in $procs) {
+    $t = $p.MainWindowTitle
+    if ($t -and ($t -like "*$name*")) {
+      $null = $shell.AppActivate($t)
+      exit
+    }
+  }
+}
+foreach ($p in $procs) {
+  $t = $p.MainWindowTitle
+  if ($t) { $null = $shell.AppActivate($t); exit }
+}
+"""
+
+
+def focus_cursor(workspace: str | None = None) -> None:
+    """聚焦 Cursor；多窗口时优先匹配 workspace 对应标题，否则激活任一前台窗口。"""
+    if sys.platform != "win32":
+        return
+    import subprocess
+
+    env = os.environ.copy()
+    if workspace:
+        env["CURSOR_LIGHT_FOCUS_HINT"] = workspace
+    else:
+        env.pop("CURSOR_LIGHT_FOCUS_HINT", None)
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    subprocess.run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", _FOCUS_CURSOR_PS],
+        env=env,
+        creationflags=flags,
+        check=False,
+    )
+
+
 def read_aggregate() -> tuple[str, int]:
     """
     多 Cursor 窗口 / 多会话聚合：
-    - 每个会话独立 json
+    - 每个会话独立 json（跳过 _heartbeat.json）
     - 优先级：error > busy > success
-    - 无会话文件时：30s 内心跳仍显示黄灯（工具间隙）；全会话 success 则立即绿灯
+    - busy 超过 BUSY_IDLE_SEC 且无心跳 → 忽略；error 超过 ERROR_STALE_SEC → 忽略
+    - 无有效会话文件时：30s 内心跳补黄，否则绿
     """
     if not STATUS_DIR.is_dir():
         return "success", 0
 
     now = time.time()
+    hb_active = _heartbeat_active(now)
     _cleanup_stale_sessions(now)
 
     modes: list[str] = []
@@ -200,21 +301,25 @@ def read_aggregate() -> tuple[str, int]:
             if not status:
                 continue
 
-            age = _session_file_age(path, now)
-            if age is None:
+            ts = data.get("ts")
+            if not ts:
                 continue
+            age = now - parse_timestamp(ts).timestamp()
             if age > STALE_SECONDS:
                 continue
 
             mode = normalize_mode(status)
+            if mode == "busy" and age > BUSY_IDLE_SEC and not hb_active:
+                continue
+            if mode == "error" and age > ERROR_STALE_SEC:
+                continue
             active += 1
             modes.append(mode)
         except Exception:
             continue
 
     if not modes:
-        # 无会话文件：仅心跳表示「可能仍在干活」
-        agg = "busy" if _heartbeat_active(now) else "success"
+        agg = "busy" if hb_active else "success"
     elif "error" in modes:
         agg = "error"
     elif "busy" in modes:
@@ -264,6 +369,10 @@ class TrafficLightApp:
         self._drag_x = self._drag_y = 0
         self._photo: ImageTk.PhotoImage | None = None
         self._last_key = ""
+        self._status_mtime = 0.0
+        self._poll_tick = 0
+        self._display_agg = "success"
+        self._error_seen_at: float | None = None
         self._tray_icon = None
         chroma_hex = "#%02x%02x%02x" % ui.CHROMA
         self.root = tk.Tk()
@@ -281,6 +390,7 @@ class TrafficLightApp:
         self.canvas.pack()
         self.canvas.bind("<Button-1>", self._drag_start)
         self.canvas.bind("<B1-Motion>", self._drag_motion)
+        self.canvas.bind("<Double-Button-1>", self._on_double_click)
         self.canvas.bind("<MouseWheel>", self._on_mousewheel)
         self.canvas.bind("<Enter>", lambda _e: self.canvas.focus_set())
         self.root.bind("<Escape>", lambda _e: self.quit())
@@ -353,14 +463,45 @@ class TrafficLightApp:
         elif event.delta < 0:
             self._change_zoom(-ZOOM_STEP)
 
-    def poll_status(self) -> None:
-        agg, active = read_aggregate()
+    def _on_double_click(self, event) -> None:
+        if self._agg != "success":
+            return
+        ws = newest_workspace_hint()
+        focus_cursor(ws)
+
+    def _agg_for_display(self, raw: str) -> str:
+        """瞬时 error（工具失败但 Agent 马上重试）不闪红灯。"""
+        now = time.monotonic()
+        if raw == "error":
+            if self._error_seen_at is None:
+                self._error_seen_at = now
+            if now - self._error_seen_at < ERROR_MIN_SHOW_SEC:
+                return self._display_agg
+            self._display_agg = "error"
+            return "error"
+        self._error_seen_at = None
+        self._display_agg = raw
+        return raw
+
+    def _refresh_status(self) -> tuple[str, int]:
+        raw, active = read_aggregate()
+        agg = self._agg_for_display(raw)
         self._agg = agg
         self._set_image(agg)
         if self._tray_icon is not None:
             tip = {"error": "失败", "busy": "执行中", "success": "完成"}.get(agg, agg)
             self._tray_icon.icon = ui.make_tray_icon_image(agg)
             self._tray_icon.title = f"Cursor 红绿灯 — {tip}（{active} 个会话）"
+        return agg, active
+
+    def poll_status(self) -> None:
+        mtime = _status_dir_mtime()
+        self._poll_tick += 1
+        # 文件变更时立即刷新；另约每秒刷新一次（心跳超时、会话 ts 过期等）
+        if mtime != self._status_mtime or self._photo is None or self._poll_tick >= 12:
+            self._status_mtime = mtime
+            self._poll_tick = 0
+            self._refresh_status()
         self.root.after(POLL_MS, self.poll_status)
 
     def _build_tray_menu(self):

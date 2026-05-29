@@ -8,7 +8,7 @@
 |----|------|------|
 | 黄 | 执行中 | 发消息、用工具、改文件、思考等 |
 | 绿 | 完成 | 任务结束或空闲 |
-| 红 | 失败 | 工具执行失败 |
+| 红 | 失败 | 工具执行失败（持续约 1 秒以上才亮红，避免重试时闪一下） |
 
 **多窗口**：每个 Cursor 会话单独记录状态，任意一个在忙就显示黄灯，全部结束才绿灯。
 
@@ -54,6 +54,8 @@
 
 鼠标悬停在红绿灯上时，**滚轮**可缩放大小（60%～200%，会写入配置）。
 
+**双击绿灯**可打开或聚焦 Cursor。若开了多个窗口，会优先聚焦**最近更新状态的那个工程**（按 Hook 里的工作区路径匹配窗口标题）；对不上则聚焦当前任意一个 Cursor 窗口。
+
 ## 项目结构
 
 ```
@@ -64,7 +66,9 @@ cursor_rc/
 ├── cursor_light.py        # 主程序：读状态、窗口、托盘
 ├── cursor_light_ui.py     # 视觉绘制（改外观只改这个）
 ├── hooks.json             # Cursor Hook 配置
-├── hooks/set-status.ps1   # 写入状态文件
+├── hooks/set-status.py    # Hook 写状态（主）
+├── hooks/set-status.ps1   # 薄封装，便于手动测试
+├── sync.bat               # 日常同步到 ~/.cursor（不提交也可本地用）
 ├── run_cursor_light.bat
 └── stop_cursor_light.bat
 ```
@@ -88,7 +92,11 @@ cursor_rc/
 → 确认已重启 Cursor；看 `status\hook.log` 是否有 `busy` 记录。
 
 **任务结束还黄很久？**  
-→ v1.0.1+：全会话已是 success 时立即绿灯；心跳仅在「没有会话文件」时补黄灯。
+→ 需 **重启 Cursor** 加载新 `hooks.json`（`afterAgentResponse` 写绿灯，已去掉 `postToolUse` 反复写 busy）。  
+→ 超过约 45 秒无新的 busy 事件会自动视为完成；`default.json` 陈旧 busy 会在 success 时同步清除。
+
+**偶尔闪一下红灯？**  
+→ 多为 `postToolUseFailure`（某次工具失败但 Agent 立刻重试）。现已加约 **0.85 秒** 防抖，瞬时失败不会亮红；若工具真的失败停住，红灯会持续亮。
 
 **多开 Cursor 状态乱跳？**  
 → 已按会话分文件聚合；若仍异常，把 `hook.log` 最后几行发 Issue。
@@ -96,9 +104,21 @@ cursor_rc/
 **看不到托盘图标？**  
 → 点击任务栏右下角 `^` 展开隐藏图标。
 
+## 信号逻辑（简表）
+
+| Hook 事件 | 写入 | 灯 |
+|-----------|------|-----|
+| beforeSubmitPrompt / preToolUse / subagentStart | busy | 黄 |
+| afterAgentThought | thinking→busy | 黄 |
+| afterAgentResponse / stop / sessionEnd | success | 绿 |
+| postToolUseFailure | error | 红（≥0.85s 才显示） |
+
+**不挂钩**：`postToolUse`（结束后又写 busy 会常黄）、`subagentStop`（子任务结束≠主任务结束）。
+
+**聚合**（`read_aggregate`）：多会话取 `error > busy > success`；busy/error 过久或心跳过期则忽略；无会话时靠 30s 心跳补黄。
+
 ## 开发说明
 
-- 状态轮询：**0.3 秒**
-- busy 时黄灯**常亮**（不闪烁）
-- 修改外观：编辑 `cursor_light_ui.py`
-- 修改状态规则：编辑 `cursor_light.py` 与 `hooks.json`
+- 状态轮询：**约 0.08 秒**（文件变更立即刷新，约 1 秒兜底刷新时间类状态）
+- Hook 使用 **Python** 写状态
+- 修改外观：`cursor_light_ui.py`；规则：`cursor_light.py`、`hooks.json`、`hooks/set-status.py`

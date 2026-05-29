@@ -22,7 +22,8 @@ foreach ($f in $files) {
   Write-Host "  已复制 $f"
 }
 Copy-Item (Join-Path $Repo 'hooks\set-status.ps1') (Join-Path $HooksDir 'set-status.ps1') -Force
-Write-Host '  已复制 hooks\set-status.ps1'
+Copy-Item (Join-Path $Repo 'hooks\set-status.py') (Join-Path $HooksDir 'set-status.py') -Force
+Write-Host '  已复制 hooks\set-status.ps1 / set-status.py'
 
 # Python 依赖
 Write-Host '正在安装 Python 依赖...' -ForegroundColor Yellow

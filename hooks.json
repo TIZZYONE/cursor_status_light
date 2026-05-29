@@ -2,31 +2,28 @@
   "version": 1,
   "hooks": {
     "beforeSubmitPrompt": [
-      { "command": "powershell -ExecutionPolicy Bypass -File .\\hooks\\set-status.ps1 busy" }
+      { "command": "python -u .\\hooks\\set-status.py busy" }
     ],
     "preToolUse": [
-      { "command": "powershell -ExecutionPolicy Bypass -File .\\hooks\\set-status.ps1 busy" }
-    ],
-    "postToolUse": [
-      { "command": "powershell -ExecutionPolicy Bypass -File .\\hooks\\set-status.ps1 busy" }
-    ],
-    "afterFileEdit": [
-      { "command": "powershell -ExecutionPolicy Bypass -File .\\hooks\\set-status.ps1 busy" }
+      { "command": "python -u .\\hooks\\set-status.py busy" }
     ],
     "subagentStart": [
-      { "command": "powershell -ExecutionPolicy Bypass -File .\\hooks\\set-status.ps1 busy" }
+      { "command": "python -u .\\hooks\\set-status.py busy" }
     ],
     "afterAgentThought": [
-      { "command": "powershell -ExecutionPolicy Bypass -File .\\hooks\\set-status.ps1 thinking" }
+      { "command": "python -u .\\hooks\\set-status.py thinking" }
+    ],
+    "afterAgentResponse": [
+      { "command": "python -u .\\hooks\\set-status.py success" }
     ],
     "postToolUseFailure": [
-      { "command": "powershell -ExecutionPolicy Bypass -File .\\hooks\\set-status.ps1 error" }
+      { "command": "python -u .\\hooks\\set-status.py error" }
     ],
     "stop": [
-      { "command": "powershell -ExecutionPolicy Bypass -File .\\hooks\\set-status.ps1 success" }
+      { "command": "python -u .\\hooks\\set-status.py success" }
     ],
     "sessionEnd": [
-      { "command": "powershell -ExecutionPolicy Bypass -File .\\hooks\\set-status.ps1 success" }
+      { "command": "python -u .\\hooks\\set-status.py success" }
     ]
   }
 }
