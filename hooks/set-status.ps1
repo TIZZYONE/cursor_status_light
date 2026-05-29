@@ -51,9 +51,6 @@ try {
   if ($raw) {
     $obj = $raw | ConvertFrom-Json
     $sessionId = Get-SessionKey $obj
-    if (-not $sessionId -and $obj.hook_event_name) {
-      $sessionId = "evt_$([string]$obj.hook_event_name)"
-    }
   }
 }
 catch {}

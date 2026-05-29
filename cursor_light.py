@@ -53,6 +53,7 @@ SKIP_STATUS_FILES = frozenset({"hook.log", "_heartbeat.json"})
 HEARTBEAT_FILE = STATUS_DIR / "_heartbeat.json"
 
 OPACITY_PRESETS = (1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3)
+ZOOM_MIN, ZOOM_MAX, ZOOM_STEP = 0.6, 2.0, 0.08
 
 
 def display_scale() -> int:
@@ -84,22 +85,32 @@ def set_win_topmost(root: tk.Tk, on: bool) -> None:
 
 
 def load_config() -> dict:
-    default = {"always_on_top": True, "opacity": 1.0}
+    default = {"always_on_top": True, "opacity": 1.0, "zoom": 1.0}
     if not CONFIG_FILE.exists():
         return default
     try:
         data = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig"))
         if "opacity" in data:
             data["opacity"] = max(0.2, min(1.0, float(data["opacity"])))
+        if "zoom" in data:
+            data["zoom"] = max(ZOOM_MIN, min(ZOOM_MAX, float(data["zoom"])))
         return {**default, **data}
     except Exception:
         return default
 
 
-def save_config(always_on_top: bool, opacity: float) -> None:
+def save_config(always_on_top: bool, opacity: float, zoom: float) -> None:
     CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
     CONFIG_FILE.write_text(
-        json.dumps({"always_on_top": always_on_top, "opacity": round(opacity, 2)}, ensure_ascii=False, indent=2),
+        json.dumps(
+            {
+                "always_on_top": always_on_top,
+                "opacity": round(opacity, 2),
+                "zoom": round(zoom, 2),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
         encoding="utf-8",
     )
 
@@ -169,7 +180,7 @@ def read_aggregate() -> tuple[str, int]:
     多 Cursor 窗口 / 多会话聚合：
     - 每个会话独立 json
     - 优先级：error > busy > success
-    - 有心跳（30s 内有过 busy/thinking）则强制黄灯，避免工具间隙闪绿
+    - 无会话文件时：30s 内心跳仍显示黄灯（工具间隙）；全会话 success 则立即绿灯
     """
     if not STATUS_DIR.is_dir():
         return "success", 0
@@ -202,16 +213,15 @@ def read_aggregate() -> tuple[str, int]:
             continue
 
     if not modes:
-        agg = "success"
+        # 无会话文件：仅心跳表示「可能仍在干活」
+        agg = "busy" if _heartbeat_active(now) else "success"
     elif "error" in modes:
         agg = "error"
     elif "busy" in modes:
         agg = "busy"
     else:
+        # 全部 success：立即绿灯，不再被心跳拖成黄灯
         agg = "success"
-
-    if agg != "error" and _heartbeat_active(now):
-        agg = "busy"
 
     return agg, active
 
@@ -222,7 +232,16 @@ def kill_previous_instance() -> None:
     try:
         old = int(PID_FILE.read_text(encoding="utf-8").strip())
         if old != os.getpid():
-            os.kill(old, 9)
+            if sys.platform == "win32":
+                import subprocess
+
+                subprocess.run(
+                    ["taskkill", "/F", "/PID", str(old)],
+                    capture_output=True,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            else:
+                os.kill(old, 9)
     except Exception:
         pass
     try:
@@ -237,9 +256,11 @@ class TrafficLightApp:
         PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
 
         cfg = load_config()
-        self.scale = display_scale()
+        self.render_scale = display_scale()
         self.always_on_top = bool(cfg.get("always_on_top", True))
         self.opacity = float(cfg.get("opacity", 1.0))
+        self.zoom = float(cfg.get("zoom", 1.0))
+        self._agg = "success"
         self._drag_x = self._drag_y = 0
         self._photo: ImageTk.PhotoImage | None = None
         self._last_key = ""
@@ -253,13 +274,17 @@ class TrafficLightApp:
         self.root.resizable(False, False)
 
         sw = self.root.winfo_screenwidth()
-        self.root.geometry(f"{ui.BASE_W}x{ui.BASE_H}+{sw - ui.BASE_W - 28}+20")
+        self._pos_x = sw - int(ui.BASE_W * self.zoom) - 28
+        self._pos_y = 20
 
         self.canvas = tk.Label(self.root, bd=0, highlightthickness=0, bg=chroma_hex)
         self.canvas.pack()
         self.canvas.bind("<Button-1>", self._drag_start)
         self.canvas.bind("<B1-Motion>", self._drag_motion)
+        self.canvas.bind("<MouseWheel>", self._on_mousewheel)
+        self.canvas.bind("<Enter>", lambda _e: self.canvas.focus_set())
         self.root.bind("<Escape>", lambda _e: self.quit())
+        self._apply_window_size()
 
         self.apply_topmost(self.always_on_top)
         self.apply_opacity(self.opacity)
@@ -268,7 +293,19 @@ class TrafficLightApp:
         self.root.protocol("WM_DELETE_WINDOW", self.quit)
 
     def _persist(self) -> None:
-        save_config(self.always_on_top, self.opacity)
+        save_config(self.always_on_top, self.opacity, self.zoom)
+
+    def _apply_window_size(self) -> None:
+        w = max(1, int(ui.BASE_W * self.zoom))
+        h = max(1, int(ui.BASE_H * self.zoom))
+        self.root.geometry(f"{w}x{h}+{self._pos_x}+{self._pos_y}")
+
+    def _change_zoom(self, delta: float) -> None:
+        self.zoom = max(ZOOM_MIN, min(ZOOM_MAX, round(self.zoom + delta, 2)))
+        self._apply_window_size()
+        self._last_key = ""
+        self._set_image(self._agg)
+        self._persist()
 
     def apply_opacity(self, value: float) -> None:
         self.opacity = max(0.2, min(1.0, value))
@@ -289,24 +326,36 @@ class TrafficLightApp:
         self._rebuild_tray_menu()
 
     def _set_image(self, agg: str) -> None:
-        if agg == self._last_key and self._photo is not None:
+        key = f"{agg}:{self.zoom}"
+        if key == self._last_key and self._photo is not None:
             return
-        self._last_key = agg
+        self._last_key = key
 
-        raw = ui.render_traffic_light(agg, self.scale)
-        display = raw.resize((ui.BASE_W, ui.BASE_H), Image.Resampling.LANCZOS)
+        raw = ui.render_traffic_light(agg, self.render_scale)
+        dw = max(1, int(ui.BASE_W * self.zoom))
+        dh = max(1, int(ui.BASE_H * self.zoom))
+        display = raw.resize((dw, dh), Image.Resampling.LANCZOS)
         self._photo = ImageTk.PhotoImage(display)
         self.canvas.configure(image=self._photo)
 
     def _drag_start(self, event) -> None:
-        self._drag_x = event.x_root - self.root.winfo_x()
-        self._drag_y = event.y_root - self.root.winfo_y()
+        self._drag_x = event.x_root - self._pos_x
+        self._drag_y = event.y_root - self._pos_y
 
     def _drag_motion(self, event) -> None:
-        self.root.geometry(f"+{event.x_root - self._drag_x}+{event.y_root - self._drag_y}")
+        self._pos_x = event.x_root - self._drag_x
+        self._pos_y = event.y_root - self._drag_y
+        self.root.geometry(f"+{self._pos_x}+{self._pos_y}")
+
+    def _on_mousewheel(self, event) -> None:
+        if event.delta > 0:
+            self._change_zoom(ZOOM_STEP)
+        elif event.delta < 0:
+            self._change_zoom(-ZOOM_STEP)
 
     def poll_status(self) -> None:
         agg, active = read_aggregate()
+        self._agg = agg
         self._set_image(agg)
         if self._tray_icon is not None:
             tip = {"error": "失败", "busy": "执行中", "success": "完成"}.get(agg, agg)

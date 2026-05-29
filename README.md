@@ -52,6 +52,8 @@
 - **窗口透明度**：30%～100%
 - **退出**
 
+鼠标悬停在红绿灯上时，**滚轮**可缩放大小（60%～200%，会写入配置）。
+
 ## 项目结构
 
 ```
@@ -73,7 +75,7 @@ cursor_rc/
 
 - `%USERPROFILE%\.cursor\status\*.json` — 各会话状态
 - `%USERPROFILE%\.cursor\status\hook.log` — Hook 调试日志
-- `%USERPROFILE%\.cursor\cursor_light_config.json` — 置顶/透明度设置
+- `%USERPROFILE%\.cursor\cursor_light_config.json` — 置顶/透明度/缩放
 
 ## 给他人使用
 
@@ -85,8 +87,8 @@ cursor_rc/
 **一直是绿灯？**  
 → 确认已重启 Cursor；看 `status\hook.log` 是否有 `busy` 记录。
 
-**黄灯闪一下变绿又变黄？**  
-→ 已用心跳保持：30 秒内有过 busy/thinking 会一直保持黄灯；请 `sync.bat` 更新后重启红绿灯。
+**任务结束还黄很久？**  
+→ v1.0.1+：全会话已是 success 时立即绿灯；心跳仅在「没有会话文件」时补黄灯。
 
 **多开 Cursor 状态乱跳？**  
 → 已按会话分文件聚合；若仍异常，把 `hook.log` 最后几行发 Issue。
