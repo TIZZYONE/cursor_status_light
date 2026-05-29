@@ -226,8 +226,17 @@ def newest_workspace_hint() -> str | None:
 _FOCUS_CURSOR_PS = r"""
 $ErrorActionPreference = "SilentlyContinue"
 $hint = $env:CURSOR_LIGHT_FOCUS_HINT
-$exe = Join-Path $env:LOCALAPPDATA "Programs\cursor\Cursor.exe"
-if (-not (Test-Path $exe)) { $exe = Join-Path $env:LOCALAPPDATA "Programs\Cursor\Cursor.exe" }
+$exe = $null
+foreach ($c in @(
+  (Join-Path $env:LOCALAPPDATA "Programs\cursor\Cursor.exe"),
+  (Join-Path $env:LOCALAPPDATA "Programs\Cursor\Cursor.exe"),
+  (Join-Path $env:ProgramFiles "Cursor\Cursor.exe"),
+  (Join-Path ${env:ProgramFiles(x86)} "Cursor\Cursor.exe")
+)) { if (Test-Path $c) { $exe = $c; break } }
+if (-not $exe) {
+  $cmd = Get-Command cursor -ErrorAction SilentlyContinue
+  if ($cmd) { $exe = $cmd.Source }
+}
 $procs = @(Get-Process -Name "Cursor" -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 })
 if ($procs.Count -eq 0) {
   if (Test-Path $exe) {
@@ -464,10 +473,10 @@ class TrafficLightApp:
             self._change_zoom(-ZOOM_STEP)
 
     def _on_double_click(self, event) -> None:
-        if self._agg != "success":
-            return
-        ws = newest_workspace_hint()
+        """双击打开/聚焦 Cursor（任意灯色均可；绿灯时优先匹配最近工作区）。"""
+        ws = newest_workspace_hint() if self._agg == "success" else None
         focus_cursor(ws)
+        return "break"
 
     def _agg_for_display(self, raw: str) -> str:
         """瞬时 error（工具失败但 Agent 马上重试）不闪红灯。"""
